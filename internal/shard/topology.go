@@ -137,9 +137,6 @@ func (r *Ring) RouteRead(t uint64) int {
 func (r *Ring) RouteWrite(t uint64) []int { return []int{r.RouteRead(t)} }
 
 // ---------------------------------------------------------------- Directory
-
-// Directory is the design Vitess, Figma, Notion and friends converge on.
-//
 // Two levels of indirection:
 //
 //	tenant -> logical shard   hash % LogicalCount, fixed for all time

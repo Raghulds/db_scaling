@@ -24,8 +24,8 @@ const (
 	idEpochMs  = 1704067200000 // 2024-01-01T00:00:00Z
 	shardBits  = 10
 	seqBits    = 12
-	maxShardID = (1 << shardBits) - 1
-	maxSeq     = (1 << seqBits) - 1
+	maxShardID = (1 << shardBits) - 1 // Unique shard IDs possible
+	maxSeq     = (1 << seqBits) - 1   // Counter of 4096 possible, as it's 12 bits for the counter
 	shardShift = seqBits
 	timeShift  = seqBits + shardBits
 )
@@ -52,9 +52,7 @@ func (g *IDGen) Next() int64 {
 	switch {
 	case ms == g.lastMs:
 		g.seq++
-		if g.seq > maxSeq {
-			// 4096 ids per millisecond exhausted: spin to the next ms rather
-			// than hand out a duplicate.
+		if g.seq > maxSeq { // 4096 ids per millisecond exhausted
 			for ms <= g.lastMs {
 				time.Sleep(200 * time.Microsecond)
 				ms = time.Now().UnixMilli() - idEpochMs
@@ -64,8 +62,6 @@ func (g *IDGen) Next() int64 {
 	case ms > g.lastMs:
 		g.seq = 0
 	default:
-		// Clock went backwards (NTP step, VM migration). Refusing to go back
-		// is the only safe move; the alternative is duplicate ids.
 		ms = g.lastMs
 		g.seq++
 	}
