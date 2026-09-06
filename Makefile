@@ -59,6 +59,9 @@ shards-init: ## Apply the shard schema to every running shard
 lab04: build ## Lab 04 -- Go shard router: tests + guided demo
 	go test ./... -count=1
 	$(MAKE) shards-up shards-init
+	rm -f tmp/topology.json
+	@for s in 0 1 2 3; do scripts/psql.sh shard $$s \
+	  -c "TRUNCATE orders, ledger, outbox, applied"; done
 	./bin/shardctl seed   --tenants $(TENANTS)
 	./bin/shardctl demo
 
@@ -102,9 +105,8 @@ lab07: logical-up ## Lab 07 -- logical replication as a reshard primitive
 
 # ------------------------------------------------------------------- go
 .PHONY: build test tidy fmt
-build: ## Build shardctl + reshard into ./bin
+build: ## Build shardctl into ./bin
 	go build -o bin/shardctl ./cmd/shardctl
-	go build -o bin/reshard  ./cmd/reshard
 
 test: ## Run the Go unit tests (no database needed)
 	go test ./... -count=1

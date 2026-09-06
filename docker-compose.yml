@@ -1,0 +1,210 @@
+# DB Scaling labs.
+#
+# Profiles keep the footprint small -- only `pg` starts by default.
+#   labs 00-03  : docker compose up -d pg
+#   labs 04-05  : docker compose --profile shards up -d
+#   lab  05     : docker compose --profile reshard up -d   (adds shards 4-7)
+#   lab  06     : docker compose --profile citus up -d
+#   lab  07     : docker compose --profile logical up -d
+#
+# Ports are deliberately in the 554xx range to stay clear of any local
+# Postgres you already run on 5432/5433.
+
+x-pg-common: &pg-common
+  environment:
+    POSTGRES_USER: lab
+    POSTGRES_PASSWORD: lab
+    POSTGRES_DB: lab
+    PGDATA: /var/lib/postgresql/data/pgdata
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U lab -d lab"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+  # wal_level=logical is needed by lab 07 and by the resharding backfill in
+  # lab 05. Stats/timing knobs are on so EXPLAIN output is worth reading.
+  command:
+    - postgres
+    - -c
+    - wal_level=logical
+    - -c
+    - max_wal_senders=10
+    - -c
+    - max_replication_slots=10
+    - -c
+    - shared_buffers=256MB
+    - -c
+    - work_mem=16MB
+    - -c
+    - maintenance_work_mem=256MB
+    - -c
+    - track_io_timing=on
+    - -c
+    - shared_preload_libraries=pg_stat_statements
+    # 0 is the default, which makes PREPARE TRANSACTION fail outright.
+    # Lab 04's 2PC demo needs it; leaving it >0 in production is a choice you
+    # should make deliberately, because a forgotten prepared xact blocks VACUUM.
+    - -c
+    - max_prepared_transactions=10
+    - -c
+    - log_min_duration_statement=500
+
+# The Citus image ships its own shared_preload_libraries=citus, so these
+# services cannot reuse *pg-common: overriding the command with that anchor's
+# would drop the citus library and the extension would fail to load. Keep
+# `citus` first in the list, which the extension requires.
+x-citus-common: &citus-common
+  image: citusdata/citus:12.1
+  profiles: ["citus"]
+  environment:
+    POSTGRES_USER: lab
+    POSTGRES_PASSWORD: lab
+    POSTGRES_DB: lab
+    PGPASSWORD: lab
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U lab -d lab"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+  command:
+    - postgres
+    - -c
+    - shared_preload_libraries=citus,pg_stat_statements
+    # wal_level=logical is what lets lab 06 step 4 move a shard with
+    # force_logical instead of block_writes. Without it,
+    # isolate_tenant_to_new_shard and citus_move_shard_placement fail with
+    # "logical decoding requires wal_level >= logical" -- which hides the fact
+    # that Citus's shard mover is lab 07's logical replication underneath.
+    - -c
+    - wal_level=logical
+    - -c
+    - max_wal_senders=10
+    - -c
+    - max_replication_slots=10
+    - -c
+    - track_io_timing=on
+
+services:
+  # ---------------------------------------------------------------- labs 00-03
+  pg:
+    <<: *pg-common
+    build: ./docker/partman
+    image: db-scaling/postgres-partman:16
+    container_name: dbs-pg
+    ports: ["55432:5432"]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./labs:/labs:ro
+
+  # ---------------------------------------------------------------- labs 04-05
+  shard0:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard0
+    profiles: ["shards"]
+    ports: ["55440:5432"]
+    volumes: [shard0-data:/var/lib/postgresql/data]
+  shard1:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard1
+    profiles: ["shards"]
+    ports: ["55441:5432"]
+    volumes: [shard1-data:/var/lib/postgresql/data]
+  shard2:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard2
+    profiles: ["shards"]
+    ports: ["55442:5432"]
+    volumes: [shard2-data:/var/lib/postgresql/data]
+  shard3:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard3
+    profiles: ["shards"]
+    ports: ["55443:5432"]
+    volumes: [shard3-data:/var/lib/postgresql/data]
+
+  # -------------------------------------------------- lab 05: 4 -> 8 reshard
+  shard4:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard4
+    profiles: ["reshard"]
+    ports: ["55444:5432"]
+    volumes: [shard4-data:/var/lib/postgresql/data]
+  shard5:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard5
+    profiles: ["reshard"]
+    ports: ["55445:5432"]
+    volumes: [shard5-data:/var/lib/postgresql/data]
+  shard6:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard6
+    profiles: ["reshard"]
+    ports: ["55446:5432"]
+    volumes: [shard6-data:/var/lib/postgresql/data]
+  shard7:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-shard7
+    profiles: ["reshard"]
+    ports: ["55447:5432"]
+    volumes: [shard7-data:/var/lib/postgresql/data]
+
+  # ------------------------------------------------------------------- lab 06
+  citus-coordinator:
+    <<: *citus-common
+    container_name: dbs-citus-coordinator
+    ports: ["55450:5432"]
+    volumes:
+      - citus-coord-data:/var/lib/postgresql/data
+      - ./labs:/labs:ro
+  citus-worker1:
+    <<: *citus-common
+    container_name: dbs-citus-worker1
+    volumes: [citus-w1-data:/var/lib/postgresql/data]
+  citus-worker2:
+    <<: *citus-common
+    container_name: dbs-citus-worker2
+    volumes: [citus-w2-data:/var/lib/postgresql/data]
+
+  # ------------------------------------------------------------------- lab 07
+  logical-pub:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-logical-pub
+    profiles: ["logical"]
+    ports: ["55460:5432"]
+    volumes:
+      - logical-pub-data:/var/lib/postgresql/data
+      - ./labs:/labs:ro
+  logical-sub:
+    <<: *pg-common
+    image: postgres:16
+    container_name: dbs-logical-sub
+    profiles: ["logical"]
+    ports: ["55461:5432"]
+    volumes:
+      - logical-sub-data:/var/lib/postgresql/data
+      - ./labs:/labs:ro
+
+volumes:
+  pg-data:
+  shard0-data:
+  shard1-data:
+  shard2-data:
+  shard3-data:
+  shard4-data:
+  shard5-data:
+  shard6-data:
+  shard7-data:
+  citus-coord-data:
+  citus-w1-data:
+  citus-w2-data:
+  logical-pub-data:
+  logical-sub-data:
